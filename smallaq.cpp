@@ -150,7 +150,7 @@ uint64_t read_uint64_varsize(const uint8_t* input, size_t buffer_size, size_t* r
 
 // Function to store data from a source buffer to a destination buffer with less than 8 bits per entry
 // is_nucleotide is needed in order to map uracil to thymine internally
-bool store_mapped_data(const uint8_t* src, size_t src_len, uint8_t* dst, size_t dst_buffer_size, uint8_t dst_bit_pos, const uint8_t* mapping, size_t mapping_len, size_t* bytes_written, uint8_t* next_bit_pos, bool is_rna) {
+bool store_mapped_data(const uint8_t* src, size_t src_len, uint8_t* dst, size_t dst_buffer_size, uint8_t dst_bit_pos, const uint8_t* mapping, size_t mapping_len, size_t* bytes_written, uint8_t* next_bit_pos) {
     size_t bits_per_entry = (size_t)ceil(log2(mapping_len)); // Calculate bits required per entry
     size_t dst_pos = 0;
     uint8_t bit_pos = dst_bit_pos;
@@ -162,14 +162,6 @@ bool store_mapped_data(const uint8_t* src, size_t src_len, uint8_t* dst, size_t 
     for (size_t i = 0; i < src_len; ++i) {
         // Find the index of the current source value in the mapping array
         uint8_t value_to_look_for = src[i];
-        if (is_rna) { // ugly hack to store RNA data using the thymine index for uracil
-            if (value_to_look_for == 'U') { 
-                value_to_look_for = 'T';
-            }
-            else if (value_to_look_for == 'u') {
-                value_to_look_for = 't';
-            }
-        }
 
         uint8_t* mapped_value_position = (uint8_t*)memchr(mapping, value_to_look_for, mapping_len);
         if (!mapped_value_position) {
@@ -216,7 +208,7 @@ bool store_mapped_data(const uint8_t* src, size_t src_len, uint8_t* dst, size_t 
 }
 
 // Function to read mapped data from a source buffer to a destination buffer
-bool read_mapped_data(const uint8_t* src, size_t src_len, uint8_t src_bit_pos, uint8_t* dst, size_t dst_len, size_t num_values, const uint8_t* mapping, size_t mapping_len, size_t* bytes_written, size_t* bytes_read, uint8_t* next_bit_pos, bool is_rna) {
+bool read_mapped_data(const uint8_t* src, size_t src_len, uint8_t src_bit_pos, uint8_t* dst, size_t dst_len, size_t num_values, const uint8_t* mapping, size_t mapping_len, size_t* bytes_written, size_t* bytes_read, uint8_t* next_bit_pos) {
     size_t bits_per_entry = (size_t)ceil(log2(mapping_len)); // Calculate bits required per entry
     size_t src_pos = 0;
     uint8_t bit_pos = src_bit_pos;
@@ -263,16 +255,10 @@ bool read_mapped_data(const uint8_t* src, size_t src_len, uint8_t src_bit_pos, u
         // Store the mapped value into the destination buffer
         if (*bytes_written < dst_len) {
             dst[*bytes_written] = mapping[value];
-            if (is_rna) { // ugly hack to replace thymine with uracil for RNA
-                if (dst[*bytes_written] == 'T') {
-                    dst[*bytes_written] = 'U';
-                }
-                else if (dst[*bytes_written] == 't') {
-                    dst[*bytes_written] = 'u';
-                }
-            }
-
             (*bytes_written)++;
+        }
+        else {
+            break;
         }
 
         values_read++;
@@ -397,7 +383,6 @@ typedef struct {
     bool is_nucleotide : 1;             // Indicates if the data is a nucleotide sequence
     bool is_extended : 1;               // Indicates if the data is using the extended nucleotide set
     bool is_extended_limited : 1;       // Indicates if the data is using the extended limited nucleotide set (ACGTN)
-    bool is_rna : 1;                    // Indicates if the data is RNA (same encoding as DNA, but U instead of T)
     bool has_quality_data : 1;          // Indicates if the data has associated quality scores
     bool is_phred33_quality_data : 1;   // Indicates if the quality data is phred33 (alternatively phred64)
     bool is_unknown_quality_data : 1;   // Indicates if the quality data is unknown (question marks all over)
@@ -423,7 +408,6 @@ bool determine_file_format(const char* filename, sequence_info* info, size_t max
     info->is_nucleotide = true;
     info->is_extended = false;
     info->is_extended_limited = false;
-    info->is_rna = false;
     info->has_quality_data = false;
     info->is_phred33_quality_data = false;
     info->is_unknown_quality_data = true;
@@ -475,22 +459,12 @@ bool determine_file_format(const char* filename, sequence_info* info, size_t max
                         break;
                     }
 
-                    if (value == 'U' || value == 'u') {
-                        info->is_rna = true; // it's not a problem if we enable this for amino acids
-                    }
-                    
                     bool is_amino_acid = memchr(amino_acid_extended_map, value, sizeof(amino_acid_extended_map)) != NULL;
-                    if (value == 'U') {
-                        value = 'T';
-                    }
 
                     bool is_nucleotide = memchr(nucleotide_map, value, sizeof(nucleotide_map)) != NULL;
 
                     bool is_extended_limited_nucleotide = memchr(nucleotide_extended_limited_map, value, sizeof(nucleotide_extended_limited_map)) != NULL;
                     
-                    if (value == 'u') {
-                        value = 't';
-                    }
                     bool is_extended_nucleotide = memchr(nucleotide_extended_map, value, sizeof(nucleotide_extended_map)) != NULL;
                     
                     if (!is_nucleotide && !info->is_extended) {
@@ -507,7 +481,6 @@ bool determine_file_format(const char* filename, sequence_info* info, size_t max
                         info->is_nucleotide = false;
                         info->is_extended = false; // set this correctly
                         info->is_extended_limited = false; // set this correctly
-                        info->is_rna = false; // set this correctly
                         nucleotide_check_done = true;
                         break;
                     }
@@ -710,7 +683,7 @@ bool encode_file(const char* input_filename, const char* output_filename, sequen
                 buffer = tmp_buffer;
             }
 
-            if (!store_mapped_data((const uint8_t*)line, line_len, buffer + buffer_pos, buffer_size - buffer_pos, next_bit_pos, mapping, mapping_len, &bytes_written, &next_bit_pos, info->is_rna)) {
+            if (!store_mapped_data((const uint8_t*)line, line_len, buffer + buffer_pos, buffer_size - buffer_pos, next_bit_pos, mapping, mapping_len, &bytes_written, &next_bit_pos)) {
                 fprintf(stderr, "Error processing sequence data at line %zu, position %zu, offending character '%c'\n", line_num, bytes_written, line[bytes_written]);
                 free(buffer);
                 fclose(input_file);
@@ -737,7 +710,7 @@ bool encode_file(const char* input_filename, const char* output_filename, sequen
                 buffer = tmp_buffer;
             }
 
-            if (!store_mapped_data((const uint8_t*)line, line_len, buffer + buffer_pos, buffer_size - buffer_pos, next_bit_pos, quality_mapping, quality_mapping_len, &bytes_written, &next_bit_pos, false)) {
+            if (!store_mapped_data((const uint8_t*)line, line_len, buffer + buffer_pos, buffer_size - buffer_pos, next_bit_pos, quality_mapping, quality_mapping_len, &bytes_written, &next_bit_pos)) {
                 fprintf(stderr, "Error processing quality data at line %zu, position %zu, offending character '%c'\n", line_num, bytes_written, line[bytes_written]);
                 free(buffer);
                 fclose(input_file);
@@ -745,7 +718,6 @@ bool encode_file(const char* input_filename, const char* output_filename, sequen
                 return false;
             }
 
-            values_written += line_len;
             buffer_pos += bytes_written;
         }
         else {
@@ -934,7 +906,7 @@ bool decode_file(const char* input_filename, size_t line_size, bool fastq_reprin
         size_t remaining_records = num_records;
         while (remaining_records > 0) {
             size_t chunk_size = remaining_records < line_size ? remaining_records : line_size;
-            if (!read_mapped_data(data_buffer + src_byte_pos, data_bytes_needed - src_byte_pos, next_bit_pos, output_buffer, line_size, chunk_size, seq_mapping, seq_mapping_len, &bytes_written, &bytes_read, &next_bit_pos, header.seq_info.is_rna)) {
+            if (!read_mapped_data(data_buffer + src_byte_pos, data_bytes_needed - src_byte_pos, next_bit_pos, output_buffer, line_size, chunk_size, seq_mapping, seq_mapping_len, &bytes_written, &bytes_read, &next_bit_pos)) {
                 fprintf(stderr, "Error reading sequence data\n");
                 fclose(input_file);
                 free(data_buffer);
@@ -968,7 +940,7 @@ bool decode_file(const char* input_filename, size_t line_size, bool fastq_reprin
                 remaining_records = num_records;
                 while (remaining_records > 0) {
                     size_t chunk_size = remaining_records < line_size ? remaining_records : line_size;
-                    if (!read_mapped_data(data_buffer + src_byte_pos, data_bytes_needed - src_byte_pos, next_bit_pos, output_buffer, line_size, chunk_size, qual_mapping, qual_mapping_len, &bytes_written, &bytes_read, &next_bit_pos, false)) {
+                    if (!read_mapped_data(data_buffer + src_byte_pos, data_bytes_needed - src_byte_pos, next_bit_pos, output_buffer, line_size, chunk_size, qual_mapping, qual_mapping_len, &bytes_written, &bytes_read, &next_bit_pos)) {
                         fprintf(stderr, "Error reading quality data\n");
                         fclose(input_file);
                         free(data_buffer);
@@ -1002,9 +974,8 @@ void print_usage(const char* executable) {
 }
 
 void print_info(sequence_info seq_info) {
-    printf("%s file, containing %s%s%s data%s.\n",
+    printf("%s file, containing %s%s data%s.\n",
         seq_info.has_quality_data ? "FASTQ" : "FASTA",
-        seq_info.is_nucleotide ? (seq_info.is_rna ? "RNA " : "DNA ") : "",
         seq_info.is_nucleotide ? "nucleotide data" : "amino acid data",
         seq_info.is_extended ? " (extended set)" : (seq_info.is_extended_limited ? " (extended limited set)" : ""),
         seq_info.has_quality_data ? (seq_info.is_unknown_quality_data ? " with unknown quality data" : (seq_info.is_phred33_quality_data ? " with phred-33 quality data" : " with phred-64 quality data")) : "");
@@ -1155,9 +1126,8 @@ int main()
     size_t values_to_read = sizeof(source_data);
     uint8_t src_bit_pos = 0;
     size_t bytes_read;
-    bool is_rna = false;
 
-    read_mapped_data(encoded_data, sizeof(encoded_data), src_bit_pos, output_data, sizeof(output_data), values_to_read, nucleotide_map, sizeof(nucleotide_map), &bytes_written, &bytes_read, &src_bit_pos, is_rna);
+    read_mapped_data(encoded_data, sizeof(encoded_data), src_bit_pos, output_data, sizeof(output_data), values_to_read, nucleotide_map, sizeof(nucleotide_map), &bytes_written, &bytes_read, &src_bit_pos);
     printf("We read %zu bytes, wrote %zu bytes.\n", bytes_read, bytes_written);
     printf("Read data (ascii): ");
     for (size_t i = 0; i < bytes_written; i++) {
@@ -1174,7 +1144,6 @@ int main()
     determine_file_format(input_filename, &seq_info, 10);
 
     printf("%s file, containing %s%s%s data%s.\n", seq_info.has_quality_data ? "FASTQ" : "FASTA",
-        seq_info.is_nucleotide ? (seq_info.is_rna ? "RNA " : "DNA ") : "",
         seq_info.is_nucleotide ? "nucleotide" : "amino acid",
         seq_info.is_extended ? " (extended set)" : (seq_info.is_extended_limited ? " (extended limited set)" : ""),
         seq_info.has_quality_data ? (seq_info.is_unknown_quality_data ? " with unknown quality data" : (seq_info.is_phred33_quality_data ? " with phred-33 quality data" : " with phred-64 quality data")) : "");
